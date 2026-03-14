@@ -75,9 +75,12 @@ Use this reference when adjusting the wrapper script or debugging a live convers
 - The wrapper always requests `return_as_file=true`.
 - Treat the returned path as the authoritative artifact.
 - Extract ZIP results into the chosen output directory.
+- When Markdown contains `data:image/...;base64,...`, post-process those images into a sibling `images/` directory and rewrite the Markdown references.
+- When URL conversions still contain `Image not available` placeholders, fetch the original page HTML, collect article `<img>` URLs, download them, and replace placeholders sequentially.
 - Copy non-ZIP artifacts into the chosen output directory unchanged.
 
 ## Notes
 
 - The API surface contains duplicated helper endpoints with `_1`, `_2`, or `_3` suffixes for different tabs. This skill uses the file pair `/process_file` + `/wait_task_finish_1` and the URL pair `/process_url` + `/wait_task_finish`.
 - Keep file and URL jobs separate even if the user provides both kinds of input.
+- The local Gradio UI does not expose every low-level Docling image option. For URL jobs, the wrapper may need to repair image placeholders outside the API response.

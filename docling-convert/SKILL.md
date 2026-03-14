@@ -17,6 +17,12 @@ Use this skill to run document conversion through a local Docling service instea
 pip install gradio_client
 ```
 
+- If URL jobs need placeholder image repair and `beautifulsoup4` is missing, install it:
+
+```bash
+pip install beautifulsoup4 lxml
+```
+
 - Read `references/gradio-api-workflow.md` only when changing endpoints, tuning advanced options, or debugging output layouts.
 
 ## Workflow
@@ -31,7 +37,7 @@ pip install gradio_client
 
 3. Choose the processing options.
    Keep `pipeline=standard`, `ocr=true`, `force_ocr=false`, `pdf_backend=dlparse_v4`, and `table_mode=accurate` unless the task calls for a change.
-   Keep `image_export_mode=embedded` when the goal is to preserve extracted images inside the returned package.
+   Keep `image_export_mode=embedded` when the goal is to preserve extracted images. The wrapper post-processes embedded Markdown images into real files under `images/`.
    Turn on enrichment flags only when the user explicitly wants code, formulas, picture classification, or picture descriptions.
 
 4. Run the wrapper script.
@@ -51,7 +57,7 @@ python scripts/docling_gradio_convert.py slides.pptx --service-url http://localh
 ```
 
 5. Verify the extracted results.
-   The script always requests `return_as_file=true`, downloads the returned artifact, and extracts it into the chosen output directory.
+   The script always requests `return_as_file=true`, downloads the returned artifact, extracts it into the chosen output directory, rewrites embedded Markdown images into local files when needed, and for URL conversions can backfill Docling image placeholders from the source page.
    Inspect the produced Markdown plus any extracted image assets before presenting the result to the user.
 
 ## Output Conventions
@@ -68,6 +74,7 @@ python scripts/docling_gradio_convert.py slides.pptx --service-url http://localh
 - Let the script infer the Gradio UI URL from the service root. `http://localhost:5001` becomes `http://localhost:5001/ui/`.
 - Let the script ask `/change_ocr_lang` for the default OCR language set when `--ocr-lang` is not provided. Fall back to `en,fr,de,es` if the endpoint is unavailable.
 - Treat a missing `gradio_client` installation as an environment issue and fix it with `pip install gradio_client` instead of rewriting the workflow.
+- If a URL conversion returns `<!-- 🖼️❌ Image not available ... -->`, let the wrapper fetch the source page, collect article images, download them into `images/`, and replace placeholders in order.
 
 ## Resources
 

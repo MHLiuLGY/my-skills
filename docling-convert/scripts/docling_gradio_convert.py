@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import glob
 import re
 import shutil
@@ -13,6 +14,8 @@ from pathlib import Path
 from typing import Iterable
 from urllib.parse import urlparse
 
+import requests
+
 DEFAULT_SERVICE_URL = "http://localhost:5001"
 DEFAULT_OCR_LANG = "en,fr,de,es"
 TO_FORMAT_CHOICES = ("json", "md", "html", "text", "doctags")
@@ -21,6 +24,14 @@ PIPELINE_CHOICES = ("legacy", "standard", "vlm", "asr")
 OCR_ENGINE_CHOICES = ("auto", "easyocr", "tesseract", "rapidocr")
 PDF_BACKEND_CHOICES = ("pypdfium2", "dlparse_v1", "dlparse_v2", "dlparse_v4")
 TABLE_MODE_CHOICES = ("fast", "accurate")
+EMBEDDED_IMAGE_PATTERN = re.compile(r"!\[(.*?)\]\(data:image/([^;]+);base64,([^)]+)\)")
+URL_IMAGE_PLACEHOLDER = "<!-- 🖼️❌ Image not available. Please use `PdfPipelineOptions(generate_picture_images=True)` -->"
+DEFAULT_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    )
+}
 
 
 def is_url(value: str) -> bool:
@@ -109,10 +120,23 @@ def get_ocr_lang(client, ocr_engine: str, explicit_ocr_lang: str | None) -> str:
     except Exception:
         resolved = None
 
+    if isinstance(resolved, dict):
+        resolved = resolved.get("value")
+
     if isinstance(resolved, str) and resolved.strip():
         return resolved.strip()
 
     return DEFAULT_OCR_LANG
+
+
+def extract_artifact_path(value) -> Path:
+    if isinstance(value, dict):
+        value = value.get("value")
+
+    if not isinstance(value, (str, Path)) or not value:
+        raise ValueError(f"Unsupported artifact payload: {value!r}")
+
+    return Path(value)
 
 
 def submit_file_job(client, handle_file, args, file_inputs: list[str], ocr_lang: str) -> tuple[str, Path]:
@@ -143,7 +167,7 @@ def submit_file_job(client, handle_file, args, file_inputs: list[str], ocr_lang:
         return_as_file=True,
         api_name="/wait_task_finish_1",
     )
-    artifact_path = Path(result[8])
+    artifact_path = extract_artifact_path(result[8])
     return task_id, artifact_path
 
 
@@ -175,7 +199,7 @@ def submit_url_job(client, args, url_inputs: list[str], ocr_lang: str) -> tuple[
         return_as_file=True,
         api_name="/wait_task_finish",
     )
-    artifact_path = Path(result[8])
+    artifact_path = extract_artifact_path(result[8])
     return task_id, artifact_path
 
 
@@ -194,6 +218,203 @@ def materialize_artifact(artifact_path: Path, output_dir: Path) -> Path:
     if artifact_path.resolve() != target_path.resolve():
         shutil.copy2(artifact_path, target_path)
     return target_path
+
+
+def import_bs4():
+    try:
+        from bs4 import BeautifulSoup
+    except ImportError:
+        return None
+
+    return BeautifulSoup
+
+
+def extract_embedded_images(markdown_root: Path) -> int:
+    extracted_count = 0
+
+    for markdown_path in markdown_root.rglob("*.md"):
+        markdown_text = markdown_path.read_text(encoding="utf-8")
+        matches = list(EMBEDDED_IMAGE_PATTERN.finditer(markdown_text))
+        if not matches:
+            continue
+
+        images_dir = markdown_path.parent / "images"
+        images_dir.mkdir(parents=True, exist_ok=True)
+
+        def replace_match(match):
+            nonlocal extracted_count
+
+            alt_text, image_type, encoded_bytes = match.groups()
+            extension = image_type.lower()
+            if extension == "jpeg":
+                extension = "jpg"
+
+            image_name = f"{markdown_path.stem}-image-{extracted_count + 1:03d}.{extension}"
+            image_path = images_dir / image_name
+            image_bytes = base64.b64decode(encoded_bytes)
+            image_path.write_bytes(image_bytes)
+            extracted_count += 1
+
+            relative_path = Path("images") / image_name
+            safe_alt_text = alt_text or "Image"
+            return f"![{safe_alt_text}]({relative_path.as_posix()})"
+
+        rewritten_text = EMBEDDED_IMAGE_PATTERN.sub(replace_match, markdown_text)
+        markdown_path.write_text(rewritten_text, encoding="utf-8")
+
+    return extracted_count
+
+
+def choose_content_root(soup):
+    candidate_selectors = [
+        "#cnblogs_post_body",
+        "article",
+        "main article",
+        "[role='main'] article",
+        ".post-body",
+        ".entry-content",
+        ".article-content",
+        ".post-content",
+        ".markdown-body",
+        ".content",
+        "main",
+    ]
+
+    for selector in candidate_selectors:
+        node = soup.select_one(selector)
+        if node and node.find("img"):
+            return node
+
+    best_node = None
+    best_score = -1
+    for node in soup.find_all(["article", "main", "section", "div"]):
+        images = node.find_all("img")
+        if not images:
+            continue
+        text_length = len(node.get_text(" ", strip=True))
+        score = len(images) * 1000 + text_length
+        if score > best_score:
+            best_node = node
+            best_score = score
+    return best_node or soup
+
+
+def fetch_page_image_urls(page_url: str) -> list[str]:
+    BeautifulSoup = import_bs4()
+    if BeautifulSoup is None:
+        print("Warning: beautifulsoup4 is not installed; skipping URL image backfill.")
+        return []
+
+    response = requests.get(page_url, headers=DEFAULT_HEADERS, timeout=60)
+    response.raise_for_status()
+
+    soup = BeautifulSoup(response.text, "lxml")
+    root = choose_content_root(soup)
+    image_urls: list[str] = []
+    seen: set[str] = set()
+
+    for image in root.find_all("img"):
+        src = (
+            image.get("src")
+            or image.get("data-src")
+            or image.get("data-original")
+            or image.get("data-actualsrc")
+            or image.get("data-lazy-src")
+        )
+        if not src:
+            continue
+
+        absolute_url = requests.compat.urljoin(page_url, src)
+        if absolute_url.startswith("data:") or absolute_url in seen:
+            continue
+
+        seen.add(absolute_url)
+        image_urls.append(absolute_url)
+
+    return image_urls
+
+
+def infer_extension(image_url: str, response: requests.Response) -> str:
+    path_extension = Path(urlparse(image_url).path).suffix.lower().lstrip(".")
+    if path_extension in {"png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"}:
+        return "jpg" if path_extension == "jpeg" else path_extension
+
+    content_type = response.headers.get("content-type", "").lower()
+    if "png" in content_type:
+        return "png"
+    if "jpeg" in content_type or "jpg" in content_type:
+        return "jpg"
+    if "gif" in content_type:
+        return "gif"
+    if "webp" in content_type:
+        return "webp"
+    if "svg" in content_type:
+        return "svg"
+    return "bin"
+
+
+def backfill_url_markdown_images(markdown_path: Path, page_url: str) -> int:
+    markdown_text = markdown_path.read_text(encoding="utf-8")
+    placeholder_count = markdown_text.count(URL_IMAGE_PLACEHOLDER)
+    if placeholder_count == 0:
+        return 0
+
+    image_urls = fetch_page_image_urls(page_url)
+    if not image_urls:
+        print(f"Warning: no source images found for {page_url}")
+        return 0
+
+    images_dir = markdown_path.parent / "images"
+    images_dir.mkdir(parents=True, exist_ok=True)
+
+    replacements: list[str] = []
+    downloaded_count = 0
+
+    for index, image_url in enumerate(image_urls[:placeholder_count], start=1):
+        response = requests.get(image_url, headers=DEFAULT_HEADERS, timeout=60)
+        response.raise_for_status()
+
+        extension = infer_extension(image_url, response)
+        image_name = f"{markdown_path.stem}-image-{index:03d}.{extension}"
+        image_path = images_dir / image_name
+        image_path.write_bytes(response.content)
+        replacements.append(f"![Image](images/{image_name})")
+        downloaded_count += 1
+
+    replacement_iter = iter(replacements)
+    rewritten_text = markdown_text
+    for _ in replacements:
+        rewritten_text = rewritten_text.replace(URL_IMAGE_PLACEHOLDER, next(replacement_iter), 1)
+
+    remaining_placeholders = rewritten_text.count(URL_IMAGE_PLACEHOLDER)
+    if remaining_placeholders:
+        rewritten_text = rewritten_text.replace(URL_IMAGE_PLACEHOLDER, "")
+        print(
+            f"Warning: removed {remaining_placeholders} unmatched image placeholders from {markdown_path.name} "
+            f"after backfilling {downloaded_count} images."
+        )
+
+    markdown_path.write_text(rewritten_text, encoding="utf-8")
+
+    return downloaded_count
+
+
+def backfill_url_job_images(markdown_root: Path, url_inputs: list[str]) -> int:
+    markdown_files = sorted(markdown_root.rglob("*.md"))
+    if not markdown_files or not url_inputs:
+        return 0
+
+    if len(url_inputs) == 1:
+        return backfill_url_markdown_images(markdown_files[0], url_inputs[0])
+
+    if len(markdown_files) != len(url_inputs):
+        print("Warning: URL/image backfill skipped because the number of Markdown files does not match the number of URLs.")
+        return 0
+
+    backfilled = 0
+    for markdown_path, page_url in zip(markdown_files, url_inputs):
+        backfilled += backfill_url_markdown_images(markdown_path, page_url)
+    return backfilled
 
 
 def print_job_plan(kind: str, inputs: list[str], output_dir: Path, service_url: str, args, ocr_lang: str) -> None:
@@ -385,9 +606,16 @@ def main() -> int:
             task_id, artifact_path = submit_url_job(client, args, job_inputs, ocr_lang)
 
         final_path = materialize_artifact(artifact_path, output_dir)
+        extracted_images = 0
+        if args.image_export_mode == "embedded" and isinstance(final_path, Path) and final_path.is_dir():
+            extracted_images = extract_embedded_images(final_path)
+            if kind == "url":
+                extracted_images += backfill_url_job_images(final_path, job_inputs)
         print(f"Task id: {task_id}")
         print(f"Artifact: {artifact_path}")
         print(f"Materialized output: {final_path}")
+        if extracted_images:
+            print(f"Extracted embedded images: {extracted_images}")
 
     return 0
 
