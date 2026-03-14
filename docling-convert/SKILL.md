@@ -1,88 +1,92 @@
 ---
 name: docling-convert
-description: 使用 docling API 批量转换文档为 Markdown 并提取图片。适用于 docx、pdf、pptx、xlsx 等格式转换为 markdown，保留文档中的图片和表格。
+description: Convert local files or URLs with a locally deployed Docling Gradio service into Markdown, JSON, HTML, text, or DocTags, with OCR and image export support. Use when handling `.docx`, `.pdf`, `.pptx`, `.xlsx`, `.html`, images, or web pages for document-to-Markdown conversion, batch conversion, image extraction, or Docling-based parsing through `http://localhost:5001`.
 ---
 
 # Docling Convert
 
-使用本地部署的 docling 服务批量转换文档为 Markdown 并提取图片。
+Use this skill to run document conversion through a local Docling service instead of ad-hoc parsing.
 
-## 环境配置
+## Quick Start
 
-确保 docling 服务已本地部署，默认为 `http://localhost:5001`
-
-安装依赖：
-```bash
-pip install requests
-```
-
-## 使用方法
-
-### 基本用法
+- Assume the Docling service is already deployed locally and reachable at `http://localhost:5001`.
+- Prefer `scripts/docling_gradio_convert.py` for repeatable work. It wraps the documented Gradio API and handles submission, waiting, and archive extraction.
+- Install the required client before running the script:
 
 ```bash
-# 转换 PDF 文件
-python "scripts/docling_convert.py" 设计报告.pdf
-
-# 转换 Word 文档
-python "scripts/docling_convert.py" 文档.docx
-
-# 指定输出目录
-python "scripts/docling_convert.py" 设计报告.pdf -o 输出目录
-
-# 批量转换（支持通配符）
-python "scripts/docling_convert.py" "*.pdf"
-
-# 自定义 API 地址
-python "scripts/docling_convert.py" 文档.docx -u http://192.168.1.100:5001
+pip install gradio_client
 ```
 
-### 在 skills 目录执行
+- Read `references/gradio-api-workflow.md` only when changing endpoints, tuning advanced options, or debugging output layouts.
+
+## Workflow
+
+1. Classify the inputs.
+   Use the file flow for local paths and the URL flow for web pages. Do not mix files and URLs in one API request; if the user gives both, run two jobs.
+
+2. Choose the outputs.
+   Default to `md`.
+   Add `json` when the user also needs structured output.
+   Add `html`, `text`, or `doctags` only when the task explicitly needs them.
+
+3. Choose the processing options.
+   Keep `pipeline=standard`, `ocr=true`, `force_ocr=false`, `pdf_backend=dlparse_v4`, and `table_mode=accurate` unless the task calls for a change.
+   Keep `image_export_mode=embedded` when the goal is to preserve extracted images inside the returned package.
+   Turn on enrichment flags only when the user explicitly wants code, formulas, picture classification, or picture descriptions.
+
+4. Run the wrapper script.
 
 ```bash
-cd "C:\Users\12556\Desktop\cc\skills\docling-convert"
-python "scripts/docling_convert.py" 设计报告.pdf
+# Single file
+python scripts/docling_gradio_convert.py report.pdf
+
+# Batch files with Markdown + JSON
+python scripts/docling_gradio_convert.py "*.pdf" --to-format md --to-format json
+
+# Single URL
+python scripts/docling_gradio_convert.py https://example.com/article --output-dir ./article
+
+# Alternate service URL
+python scripts/docling_gradio_convert.py slides.pptx --service-url http://localhost:5001
 ```
 
-### 参数说明
+5. Verify the extracted results.
+   The script always requests `return_as_file=true`, downloads the returned artifact, and extracts it into the chosen output directory.
+   Inspect the produced Markdown plus any extracted image assets before presenting the result to the user.
 
-| 参数 | 说明 |
-|-----|-----|
-| `输入文件` | 要转换的文件路径（支持 pdf, docx, pptx, xlsx 等） |
-| `-o, --output` | 输出目录（默认：输入文件同目录下的同名文件夹） |
-| `-u, --url` | docling API 地址（默认：http://localhost:5001） |
+## Output Conventions
 
-## 输出结果
+- Prefer the script defaults unless the user asks for a different layout.
+- For a single local file, extract into a sibling directory named after the input stem.
+- For a single URL, extract into `docling-<slug>` under the current working directory.
+- For multiple inputs, extract into `docling-files-batch` or `docling-urls-batch` under the current working directory, unless `--output-dir` is supplied.
+- If the user supplies `--output-dir` and both file and URL jobs are needed, the script creates `files/` and `urls/` subdirectories to keep the results separate.
 
-转换后会生成：
-- `{文件名}.md` - 转换后的 Markdown 文件
-- `images/` 文件夹 - 提取的图片文件
+## Script Notes
 
-## 支持的文件格式
+- Use `scripts/docling_gradio_convert.py --dry-run ...` to verify grouping, endpoint selection, and destination paths without contacting the service.
+- Let the script infer the Gradio UI URL from the service root. `http://localhost:5001` becomes `http://localhost:5001/ui/`.
+- Let the script ask `/change_ocr_lang` for the default OCR language set when `--ocr-lang` is not provided. Fall back to `en,fr,de,es` if the endpoint is unavailable.
+- Treat a missing `gradio_client` installation as an environment issue and fix it with `pip install gradio_client` instead of rewriting the workflow.
 
-- `.docx` - Word 文档
-- `.pdf` - PDF 文件
-- `.pptx` - PowerPoint
-- `.xlsx` - Excel
-- `.html` - 网页
-- `.md` - Markdown
-- `.csv` - 表格
-- `.png`, `.jpg`, `.jpeg` - 图片
+## Resources
 
-## API 选项说明
+### `scripts/docling_gradio_convert.py`
 
-| 选项 | 值 | 说明 |
-|-----|-----|-----|
-| `image_export_mode` | `embedded` | 返回 base64 图片数据 |
-| `image_export_mode` | `referenced` | 仅返回引用（无实际数据） |
-| `image_export_mode` | `placeholder` | 使用占位符 |
-| `table_mode` | `accurate` | 精确模式（推荐） |
-| `table_mode` | `fast` | 快速模式 |
-| `ocr_engine` | `easyocr` | 默认 OCR 引擎 |
+Use this wrapper for deterministic Docling conversions. It supports:
 
-## 注意事项
+- local files, URLs, and wildcard expansion
+- batch conversion
+- OCR and enrichment flags
+- archive download and extraction
+- output directory planning
+- dry-run validation
 
-1. **referenced 模式问题**: 该模式不会返回实际图片数据，适合直接查看，不适合批量处理
-2. **embedded 模式**: 图片以 base64 编码返回，需要额外处理才能保存为文件
-3. **大文件处理**: 增加 timeout 值避免超时
-4. **API 端点**: 本地服务默认为 `http://localhost:5001/v1/convert/source`
+### `references/gradio-api-workflow.md`
+
+Read this reference when you need:
+
+- the endpoint mapping for file versus URL jobs
+- the argument names expected by the Gradio client
+- the `wait_task_finish` tuple layout
+- the defaults adopted by this skill

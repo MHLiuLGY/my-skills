@@ -1,0 +1,4 @@
+interface:
+  display_name: "Docling Convert"
+  short_description: "Convert docs and URLs via local Docling"
+  default_prompt: "Use $docling-convert to convert these documents or URLs with the local Docling service."
