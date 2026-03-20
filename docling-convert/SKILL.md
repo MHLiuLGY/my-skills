@@ -39,6 +39,7 @@ pip install beautifulsoup4 lxml
    Keep `pipeline=standard`, `ocr=true`, `force_ocr=false`, `pdf_backend=dlparse_v4`, and `table_mode=accurate` unless the task calls for a change.
    Keep `image_export_mode=embedded` when the goal is to preserve extracted images. The wrapper post-processes embedded Markdown images into real files under `images/`.
    Turn on enrichment flags only when the user explicitly wants code, formulas, picture classification, or picture descriptions.
+   For URL jobs, the wrapper also normalizes Markdown output by injecting stable front matter, preserving unknown existing front matter keys, and prepending `# title` only when the document body does not already start with that title.
 
 4. Run the wrapper script.
 
@@ -52,12 +53,16 @@ python scripts/docling_gradio_convert.py "*.pdf" --to-format md --to-format json
 # Single URL
 python scripts/docling_gradio_convert.py https://example.com/article --output-dir ./article
 
+# Single URL with optional sidecar files
+python scripts/docling_gradio_convert.py https://example.com/article --save-source-html --save-manifest
+
 # Alternate service URL
 python scripts/docling_gradio_convert.py slides.pptx --service-url http://localhost:5001
 ```
 
 5. Verify the extracted results.
    The script always requests `return_as_file=true`, downloads the returned artifact, extracts it into the chosen output directory, rewrites embedded Markdown images into local files when needed, and for URL conversions can backfill Docling image placeholders from the source page.
+   URL Markdown outputs are post-processed after extraction so the final `.md` contains normalized front matter plus a title heading when needed.
    Inspect the produced Markdown plus any extracted image assets before presenting the result to the user.
 
 ## Output Conventions
@@ -75,6 +80,10 @@ python scripts/docling_gradio_convert.py slides.pptx --service-url http://localh
 - Let the script ask `/change_ocr_lang` for the default OCR language set when `--ocr-lang` is not provided. Fall back to `en,fr,de,es` if the endpoint is unavailable.
 - Treat a missing `gradio_client` installation as an environment issue and fix it with `pip install gradio_client` instead of rewriting the workflow.
 - If a URL conversion returns `<!-- 🖼️❌ Image not available ... -->`, let the wrapper fetch the source page, collect article images, download them into `images/`, and replace placeholders in order.
+- URL post-processing fetches the source page once and reuses that HTML for metadata extraction, title normalization, and optional sidecar output instead of maintaining a separate capture flow.
+- Existing front matter keys outside the managed set are preserved; managed keys are `url`, `title`, `description`, `author`, `published`, `cover_image`, `language`, `captured_at`, `converter`, `pipeline`, `ocr`, and `ocr_lang`.
+- Use `--save-source-html` to write `source.html` for single URL jobs, and `--save-manifest` to write `manifest.json` with the conversion settings and output summary.
+- Sidecar files are skipped for multi-URL batch jobs even if the flags are set.
 
 ## Resources
 
