@@ -336,7 +336,7 @@ def submit_url_job(client, args, url_inputs: list[str], ocr_lang: str) -> tuple[
     return task_id, artifact_path
 
 
-def materialize_artifact(artifact_path: Path, output_dir: Path) -> Path:
+def materialize_artifact(artifact_path: Path, output_dir: Path) -> tuple[Path, list[Path]]:
     if not artifact_path.exists():
         raise FileNotFoundError(f"Returned artifact does not exist: {artifact_path}")
 
@@ -344,13 +344,19 @@ def materialize_artifact(artifact_path: Path, output_dir: Path) -> Path:
 
     if zipfile.is_zipfile(artifact_path):
         with zipfile.ZipFile(artifact_path) as archive:
+            member_paths = [
+                (output_dir / Path(member_name)).resolve()
+                for member_name in archive.namelist()
+                if member_name and not member_name.endswith("/")
+            ]
             archive.extractall(output_dir)
-        return output_dir
+        materialized_paths = [path for path in member_paths if path.exists() and path.is_file()]
+        return output_dir, materialized_paths
 
     target_path = output_dir / artifact_path.name
     if artifact_path.resolve() != target_path.resolve():
         shutil.copy2(artifact_path, target_path)
-    return target_path
+    return target_path, [target_path.resolve()]
 
 
 def import_bs4():
@@ -362,14 +368,10 @@ def import_bs4():
     return BeautifulSoup
 
 
-def extract_embedded_images(markdown_root: Path) -> int:
+def extract_embedded_images(markdown_paths: Iterable[Path]) -> int:
     extracted_count = 0
-    if markdown_root.is_file() and markdown_root.suffix.lower() == ".md":
-        markdown_paths = [markdown_root]
-    else:
-        markdown_paths = sorted(path for path in markdown_root.rglob("*.md") if path.is_file())
 
-    for markdown_path in markdown_paths:
+    for markdown_path in sorted(path.resolve() for path in markdown_paths):
         markdown_text = markdown_path.read_text(encoding="utf-8")
         matches = list(EMBEDDED_IMAGE_PATTERN.finditer(markdown_text))
         if not matches:
@@ -712,12 +714,18 @@ def backfill_url_markdown_images(markdown_path: Path, source_page: SourcePage) -
     return downloaded_count
 
 
-def collect_markdown_files(final_path: Path) -> list[Path]:
-    if final_path.is_dir():
-        return sorted(path for path in final_path.rglob("*.md") if path.is_file())
-    if final_path.is_file() and final_path.suffix.lower() == ".md":
-        return [final_path]
-    return []
+def collect_markdown_files(materialized_paths: Iterable[Path]) -> list[Path]:
+    markdown_files: list[Path] = []
+    seen: set[Path] = set()
+
+    for path in materialized_paths:
+        resolved = path.resolve()
+        if resolved.suffix.lower() != ".md" or not resolved.is_file() or resolved in seen:
+            continue
+        seen.add(resolved)
+        markdown_files.append(resolved)
+
+    return sorted(markdown_files)
 
 
 def parse_simple_yaml_scalar(raw_value: str) -> Any:
@@ -935,16 +943,16 @@ def save_manifest(
 
 def process_url_outputs(
     *,
-    final_path: Path,
+    markdown_files: list[Path],
     output_dir: Path,
     url_inputs: list[str],
     args,
     task_id: str,
     service_url: str,
     artifact_path: Path,
+    materialized_output: Path,
     extracted_images: int,
 ) -> int:
-    markdown_files = collect_markdown_files(final_path)
     if not markdown_files or not url_inputs:
         return 0
 
@@ -967,7 +975,7 @@ def process_url_outputs(
                 task_id=task_id,
                 service_url=service_url,
                 artifact_path=artifact_path,
-                materialized_output=final_path,
+                materialized_output=materialized_output,
                 extracted_images=extracted_images,
                 url_images_backfilled=url_images_backfilled,
                 markdown_files=markdown_files,
@@ -1191,21 +1199,23 @@ def main() -> int:
         else:
             task_id, artifact_path = submit_url_job(client, args, job_inputs, ocr_lang)
 
-        final_path = materialize_artifact(artifact_path, output_dir)
+        final_path, materialized_paths = materialize_artifact(artifact_path, output_dir)
+        markdown_files = collect_markdown_files(materialized_paths)
         extracted_images = 0
-        if args.image_export_mode == "embedded" and (final_path.is_dir() or final_path.suffix.lower() == ".md"):
-            extracted_images = extract_embedded_images(final_path)
+        if args.image_export_mode == "embedded" and markdown_files:
+            extracted_images = extract_embedded_images(markdown_files)
 
         url_images_backfilled = 0
         if kind == "url":
             url_images_backfilled = process_url_outputs(
-                final_path=final_path,
+                markdown_files=markdown_files,
                 output_dir=output_dir,
                 url_inputs=job_inputs,
                 args=args,
                 task_id=task_id,
                 service_url=service_url,
                 artifact_path=artifact_path,
+                materialized_output=final_path,
                 extracted_images=extracted_images,
             )
 
